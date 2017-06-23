@@ -1,7 +1,7 @@
 local lovesvg = {
 	_VERSION     = 'lovesvg v0.0.0',
 	_DESCRIPTION = 'SVG images as löve meshes',
-	_URL         = 'https://feilk.in', -- TODO: url
+	_URL         = 'https://github.com/Feilkin/lovesvg',
 	_LICENCE     = [[
 		MIT LICENSE
 
