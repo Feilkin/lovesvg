@@ -27,6 +27,8 @@ local lovesvg = {
 	]]
 }
 
+-- TODO: coroutine loader
+
 -- This module requires Löve (https://love2d.org)
 if not love then
 	error("love not defined")
@@ -91,15 +93,117 @@ local function _parseXML(s)
 	return stack[1]
 end
 
+--- Parses element style CSS
+-- TODO: make a proper CSS parses
+local _parseCSS
+do
+	local pattern = "%s*([^:%s]+)%s*:%s*([^;]+)%s*;"
+	local end_pattern = pattern:sub(1, pattern:len() - 1) .. "$"
+
+	local parsers = {
+		["#(%x%x%x%x%x%x)"] = function (v)
+			local r = tonumber(v:sub(1, 2), 16)
+			local g = tonumber(v:sub(3, 4), 16)
+			local b = tonumber(v:sub(5, 6), 16)
+
+			return { r, g, b,  255 }
+		end
+	}
+
+	local function _parseValue(v)
+		for pattern, f in pairs(parsers) do
+			local c = v:match(pattern)
+			if c then return f(c) end
+		end
+
+		if __DEBUG then
+			print("I don't know how to parse " .. v)
+		end
+		return nil
+	end
+
+	_parseCSS = function (css)
+		local style = {}
+
+		-- load key: value; pairs into the style table
+		local raw = {}
+		for k, v in css:gmatch(pattern) do
+			table.insert(raw, {k, v})
+		end
+
+		do
+			local k, v = css:match(end_pattern)
+			table.insert(raw, {k, v})
+		end
+
+		-- parse the values into something usefull
+		for i, r in ipairs(raw) do
+			local k, v = r[1], r[2]
+			v = _parseValue(v)
+
+			style[k] = v
+		end
+
+		return style
+	end
+end
+
+local function _popStyle()
+	local s = {}
+
+	s.fill = { love.graphics.getColor() }
+
+	return s
+end
+
+local function _pushStyle(s)
+	if (not s) or (s == {}) then return end
+
+	if s.fill then love.graphics.setColor(s.fill) end
+end
+
 -- Base for Object
 local _Object = {
 	ichildren = function(self)
 		local i = 0
-		local n = table.getn(self)
+		local t = self.children
+		local n = table.getn(t)
 		return function ()
 			i = i + 1
-			if i <= n then return i, self[i] end
+			if i <= n then return i, t[i] end
 		end
+	end,
+
+
+	render = function (self, opts)
+		if self.renderer then
+			self.renderer:render(opts)
+		end
+
+		for i, child in self:ichildren() do
+			child:render(opts)
+		end
+	end,
+
+	draw = function(self)
+		-- recursive draw function
+
+		local oldStyle = _popStyle()
+		_pushStyle(self.attributes.style)
+
+		if self.attributes.style then
+			_pushStyle(self.attributes.style)
+		end
+
+		if self.renderer then
+			self.renderer:draw()
+		end
+
+		for i, child in self:ichildren() do
+			child:draw()
+		end
+
+		_pushStyle(oldStyle)
 	end
 }
 
@@ -128,11 +232,15 @@ local function _setAttributes(obj, stack)
 		obj.attributes[k] = v
 	end
 
+	if obj.attributes.style then
+		obj.attributes.style = _parseCSS(obj.attributes.style)
+	end
+
 	return obj
 end
 
 -- base for Renderer
-local _Renderer = {
+local _PathRenderer = {
 	options= { depth = 2 },
 	render = function (self, options)
 		options = options or self.options
@@ -146,6 +254,11 @@ local _Renderer = {
 				options)
 			cursor.last_command_was_move = was_move
 
+			if points and (not (cursor.start_x and cursor.start_y)) then -- or cursor.last_command_was_move or true then
+				cursor.start_x = points[1]
+				cursor.start_y = points[2]
+			end
+
 			if points then
 				for i = 1, #points, 2 do
 					insert(vertices, points[i])
@@ -156,6 +269,7 @@ local _Renderer = {
 
 		-- discard points too close to each other
 		local t = {}
+		local discard_distance = options.discard_distance or 0.000001
 
 		for i = 1, #vertices, 2 do
 			local discard = false
@@ -163,7 +277,7 @@ local _Renderer = {
 
 			if #t > 0 then
 				local bx, by = t[#t-1], t[#t]
-				if math.sqrt((bx - ax)^2 + (by - ay)^2) < 0.0000001 then
+				if math.sqrt((bx - ax)^2 + (by - ay)^2) < discard_distance then
 					discard = true
 				end
 			end
@@ -183,7 +297,7 @@ local _Renderer = {
 			local ax, ay = t[1], t[2]
 
 			local bx, by = t[#t-1], t[#t]
-			if math.sqrt((bx - ax)^2 + (by - ay)^2) < 0.0000001 then
+			if math.sqrt((bx - ax)^2 + (by - ay)^2) < discard_distance then
 				discard = true
 			end
 
@@ -202,8 +316,15 @@ local _Renderer = {
 
 		if success then
 			vertices = {}
+			-- calculate the AABB for this mesh
+			local minx, miny, maxx, maxy = math.huge,math.huge, 0,0
 
 			for _, triangle in ipairs(triangles) do
+				if triangle[1] < minx then minx = triangle[1] end
+				if triangle[2] < miny then miny = triangle[2] end
+				if triangle[3] > maxx then maxx = triangle[3] end
+				if triangle[4] > maxy then maxy = triangle[4] end
+
 				insert(vertices, {
 					triangle[1], triangle[2],
 					0,0,
@@ -225,7 +346,30 @@ local _Renderer = {
 			local mesh = love.graphics.newMesh(vertices)
 			mesh:setDrawMode("triangles")
 			self.mesh = mesh
+			self.AABB = { minx, miny, maxx, maxy }
 			return mesh
+		end
+	end,
+
+	draw = function (self)
+		if self.mesh then
+			love.graphics.draw(self.mesh, 0,0)
+		end
+		if ((not self.mesh) or __DEBUG) and self.polygon then
+			local old_color = { love.graphics.getColor() }
+			love.graphics.setColor(0, 0, 0, 128)
+			love.graphics.line(self.polygon)
+
+			love.graphics.setColor(255, 0, 0, 128)
+			love.graphics.line(self.polygon[1],self.polygon[2],
+			                   self.polygon[#self.polygon - 1],
+			                   self.polygon[#self.polygon])
+			love.graphics.setPointSize(6)
+			love.graphics.setColor(255, 0, 255, 128)
+			love.graphics.points(self.polygon)
+			love.graphics.setColor(0, 255, 0, 128)
+			love.graphics.points(self.polygon[1], self.polygon[2])
+			love.graphics.setColor(old_color)
 		end
 	end,
 
@@ -233,22 +377,14 @@ local _Renderer = {
 	render_functions = {
 		M = function (args, cursor, options)
 			cursor.x, cursor.y = args[1], args[2]
-
-			if not (cursor.start_x and cursor.start_y) then
-				cursor.start_x = cursor.x
-				cursor.start_y = cursor.y
-			end
+			cursor.start_x, cursor.start_y = nil, nil
 
 			return nil, true
 		end,
 		m = function (args, cursor, options)
 			cursor.x = cursor.x + args[1]
 			cursor.y = cursor.y + args[2]
-
-			if not (cursor.start_x and cursor.start_y) then
-				cursor.start_x = cursor.x
-				cursor.start_y = cursor.y
-			end
+			cursor.start_x, cursor.start_y = nil, nil
 
 			return nil, true
 		end,
@@ -316,15 +452,13 @@ local _Renderer = {
 		end,
 		Z = function (args, cursor, options)
 			cursor.x, cursor.y = cursor.start_x, cursor.start_y
-			cursor.start_x, cursor.start_y = nil, nil
 
-			return nil, true
+			return { cursor.x, cursor.y }
 		end,
 		z = function (args, cursor, options)
 			cursor.x, cursor.y = cursor.start_x, cursor.start_y
-			cursor.start_x, cursor.start_y = nil, nil
 
-			return nil, true
+			return { cursor.x, cursor.y}
 		end,
 		C = function (args, cursor, options)
 			local curve = love.math.newBezierCurve(
@@ -350,19 +484,47 @@ local _Renderer = {
 			
 			return v
 		end,
+		Q = function (args, cursor, options)
+			local curve = love.math.newBezierCurve(
+				cursor.x, cursor.y,
+				args[1], args[2],
+				args[3], args[4])
+
+			local v = curve:render(options.depth)
+			cursor.x, cursor.y = v[#v - 1], v[#v]
+
+			return v
+		end,
+		q = function (args, cursor, options)
+			local curve = love.math.newBezierCurve(
+				cursor.x, cursor.y,
+				cursor.x + args[1], cursor.y + args[2],
+				cursor.x + args[3], cursor.y + args[4])
+
+			local v = curve:render(options.depth)
+			cursor.x, cursor.y = v[#v - 1], v[#v]
+			
+			return v
+		end,
+		T = function (args, cursor, options)
+			error("T is not implemented yet!")
+		end,
+		t = function (args, cursor, options)
+			error("t is not implemented yet!")
+		end,
 	}
 }
 
---- Creates a new Renderer
+--- Creates a new PathRenderer
 -- @param tokenstream TokenStream this Renderer should use
 -- @return a empty Renderer
-local function _newRenderer(tokenstream)
+local function _pathRenderer(tokenstream)
 	tokenstream = tokenstream or {}
 	local r = {
 		tokenstream = tokenstream
 	}
 
-	setmetatable(r, { __index = _Renderer, __call = r.render })
+	setmetatable(r, { __index = _PathRenderer, __call = r.render })
 	return r
 end
 
@@ -378,7 +540,7 @@ do
 	local insert = table.insert
 
 	-- Patterns for tokenizing the draw commands
-	local OP_CLASS    = "MmLlHhVvZzCc"
+	local OP_CLASS    = "MmLlHhVvZzCcQqTt"
 	local DELIM_CLASS = "%s,"
 	local TRASH_CAPTURE = string.format("[%s]*",
 		DELIM_CLASS)
@@ -405,7 +567,11 @@ do
 		Z = 0,
 		z = 0,
 		C = 6,
-		c = 6
+		c = 6,
+		Q = 4,
+		q = 4,
+		T = 2,
+		t = 2,
 	}
 
 	--- Checks that there are right amount of arguments ahead.
@@ -421,9 +587,11 @@ do
 				s, e = buffer:find(ARG_CAPTURE, offset)
 
 				if not s then
-					print(("!"):rep(64))
-					print(buffer:sub(offset))
-					print(("!"):rep(64))
+					if __DEBUG then
+						print(("!"):rep(64))
+						print(buffer:sub(offset))
+						print(("!"):rep(64))
+					end
 					return false
 				end
 			end
@@ -449,7 +617,9 @@ do
 			end
 
 			if not peekargs(buffer, arg_count) then
-				print(buffer)
+				if __DEBUG then
+					print(buffer)
+				end
 				error(string.format("Expected command, found '%s' instead",
 					match(buffer,
 						"^(.*)[" .. DELIM_CLASS .. OP_CLASS .. "]")))
@@ -523,7 +693,7 @@ do
 	end
 end
 
---- Tokenizes given draw command, and constructs Renderer for it.
+--- Tokenizes given draw command, and constructs a PathRenderer for it.
 -- Renderer is a function that returns löve meshes
 -- @param cmdstr SVG draw command string
 -- @return a Renderer
@@ -532,8 +702,53 @@ local function _parseDrawCommand(cmdstr)
 	local tokenstream = _tokenize(cmdstr)
 
 	-- Construct the Renderer
-	local renderer = _newRenderer(tokenstream)
+	local renderer = _pathRenderer(tokenstream)
 	return renderer
+end
+
+--- metatable for RectRenderer
+local _RectRenderer = {
+	render = function (self, opts)
+		local x, y = self.x, self.y
+		local w, h = self.width, self.height
+
+		local vertices = {
+			{x, y, 0,0, 255, 255, 255, 255},
+			{x + w, y, 0,0, 255, 255, 255, 255},
+			{x + w, y + h, 0,0, 255, 255, 255, 255},
+			{x, y + h, 0,0, 255, 255, 255, 255}
+		}
+
+		self.polygon = vertices
+		self.AABB = {
+			x, y,
+			x + w, y + h
+		}
+
+		local mesh = love.graphics.newMesh(vertices, texture, mode)
+		mesh:setDrawMode("fan")
+
+		self.mesh = mesh
+
+		return mesh
+	end,
+
+	draw = function (self)
+		love.graphics.draw(self.mesh, 0,0)
+	end
+}
+
+--- constructs a new RectRenderer
+-- @param obj a SVG[rect] obj
+local function _rectRenderer(obj)
+	local r = {
+		x = obj.attributes.x,
+		y = obj.attributes.y,
+		width = obj.attributes.width,
+		height = obj.attributes.height
+	}
+	setmetatable(r, { __index = _RectRenderer, __call = r.render })
+	return r
 end
 
 --- Walks the Stack, creating a tree of Objects.
@@ -542,13 +757,18 @@ end
 -- @param stack stack to walk
 -- @return the object passed as root
 local function _walkStack(root, stack)
+	root.label = stack.label
 	if stack.xarg then
 		_setAttributes(root, stack)
 	end
 
-	if root.attributes.d and (root.attributes.d ~= "") then
-		local renderer = _parseDrawCommand(root.attributes.d)
-		root.renderer = renderer
+	if root.label == "path" then
+		if root.attributes.d and (root.attributes.d ~= "") then
+			local renderer = _parseDrawCommand(root.attributes.d)
+			root.renderer = renderer
+		end
+	elseif root.label == "rect" then
+		root.renderer = _rectRenderer(root)
 	end
 
 	if #stack and (#stack > 0) then
@@ -568,10 +788,25 @@ end
 -- @return SVG Object
 -- @see _newObject
 function lovesvg.parseSVG(contents)
+	if (not contents) or (type(contents) ~= "string") then
+		error("lovesvg.parseSVG requires string contents as first argument", 2)
+	end
+
 	local stack = _parseXML(contents)
 	local root = _newObject()
 
 	_walkStack(root, stack)
+
+	return root
+end
+
+--- Loads SVG image from file, returns Object that can be drawn
+function lovesvg.loadSVG(filename, opts)
+	opts = opts or { depth = 2 }
+	local contents = love.filesystem.read(filename)
+	local root = lovesvg.parseSVG(contents)
+
+	root:render(opts)
 
 	return root
 end
