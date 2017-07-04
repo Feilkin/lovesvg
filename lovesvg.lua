@@ -107,7 +107,11 @@ do
 			local b = tonumber(v:sub(5, 6), 16)
 
 			return { r, g, b,  255 }
-		end
+		end,
+		["%-?%d+%.?%d*"] = function (v)
+			return tonumber(v)
+		end,
+		["none"] = function (v) return nil end,
 	}
 
 	local function _parseValue(v)
@@ -116,9 +120,7 @@ do
 			if c then return f(c) end
 		end
 
-		if __DEBUG then
-			print("I don't know how to parse " .. v)
-		end
+		print("I don't know how to parse " .. v)
 		return nil
 	end
 
@@ -188,22 +190,24 @@ local _Object = {
 	draw = function(self)
 		-- recursive draw function
 
+		--[[
 		local oldStyle = _popStyle()
 		_pushStyle(self.attributes.style)
 
 		if self.attributes.style then
 			_pushStyle(self.attributes.style)
 		end
+		--]]
 
 		if self.renderer then
-			self.renderer:draw()
+			self.renderer:draw(self.attributes.style)
 		end
 
 		for i, child in self:ichildren() do
 			child:draw()
 		end
 
-		_pushStyle(oldStyle)
+		--_pushStyle(oldStyle)
 	end
 }
 
@@ -234,6 +238,8 @@ local function _setAttributes(obj, stack)
 
 	if obj.attributes.style then
 		obj.attributes.style = _parseCSS(obj.attributes.style)
+	else
+		obj.attributes.style = {}
 	end
 
 	return obj
@@ -345,18 +351,29 @@ local _PathRenderer = {
 
 			local mesh = love.graphics.newMesh(vertices)
 			mesh:setDrawMode("triangles")
+			self.triangles = triangles
 			self.mesh = mesh
 			self.AABB = { minx, miny, maxx, maxy }
 			return mesh
 		end
 	end,
 
-	draw = function (self)
-		if self.mesh then
+	draw = function (self, style)
+		local old_color = { love.graphics.getColor() }
+		if style.fill and self.mesh then
+			love.graphics.setColor(style.fill)
 			love.graphics.draw(self.mesh, 0,0)
 		end
-		if ((not self.mesh) or __DEBUG) and self.polygon then
-			local old_color = { love.graphics.getColor() }
+		if style.stroke and self.polygon then
+			love.graphics.setColor(style.stroke)
+
+			local old_width = love.graphics.getLineWidth()
+			love.graphics.setLineWidth(style['stroke-width'] or old_width)
+
+			love.graphics.polygon('line', self.polygon)
+			love.graphics.setLineWidth(old_width)
+		end
+		if _DEBUG and self.polygon then
 			love.graphics.setColor(0, 0, 0, 128)
 			love.graphics.line(self.polygon)
 
@@ -369,8 +386,8 @@ local _PathRenderer = {
 			love.graphics.points(self.polygon)
 			love.graphics.setColor(0, 255, 0, 128)
 			love.graphics.points(self.polygon[1], self.polygon[2])
-			love.graphics.setColor(old_color)
 		end
+		love.graphics.setColor(old_color)
 	end,
 
 	-- The actual render functions
@@ -587,11 +604,9 @@ do
 				s, e = buffer:find(ARG_CAPTURE, offset)
 
 				if not s then
-					if __DEBUG then
-						print(("!"):rep(64))
-						print(buffer:sub(offset))
-						print(("!"):rep(64))
-					end
+					print(("!"):rep(64))
+					print(buffer:sub(offset))
+					print(("!"):rep(64))
 					return false
 				end
 			end
@@ -617,9 +632,7 @@ do
 			end
 
 			if not peekargs(buffer, arg_count) then
-				if __DEBUG then
-					print(buffer)
-				end
+				print(buffer)
 				error(string.format("Expected command, found '%s' instead",
 					match(buffer,
 						"^(.*)[" .. DELIM_CLASS .. OP_CLASS .. "]")))
@@ -719,22 +732,26 @@ local _RectRenderer = {
 			{x, y + h, 0,0, 255, 255, 255, 255}
 		}
 
-		self.polygon = vertices
+		self.polygon = { x,y, x+w,y, x+w,y+h, x,y+h }
 		self.AABB = {
 			x, y,
 			x + w, y + h
 		}
-
-		local mesh = love.graphics.newMesh(vertices, texture, mode)
-		mesh:setDrawMode("fan")
-
-		self.mesh = mesh
-
-		return mesh
 	end,
 
-	draw = function (self)
-		love.graphics.draw(self.mesh, 0,0)
+	draw = function (self, style)
+		local old_color = { love.graphics.getColor() }
+		if style.fill then
+			love.graphics.setColor(style.fill)
+			love.graphics.rectangle('fill', self.x, self.y, self.width, self.height)
+		end
+
+		if style.stroke then
+			love.graphics.setColor(style.stroke)
+			love.graphics.rectangle('line', self.x, self.y, self.width, self.height)
+		end
+
+		love.graphics.setColor(old_color)
 	end
 }
 
@@ -742,10 +759,10 @@ local _RectRenderer = {
 -- @param obj a SVG[rect] obj
 local function _rectRenderer(obj)
 	local r = {
-		x = obj.attributes.x,
-		y = obj.attributes.y,
-		width = obj.attributes.width,
-		height = obj.attributes.height
+		x = tonumber(obj.attributes.x),
+		y = tonumber(obj.attributes.y),
+		width = tonumber(obj.attributes.width),
+		height = tonumber(obj.attributes.height)
 	}
 	setmetatable(r, { __index = _RectRenderer, __call = r.render })
 	return r
