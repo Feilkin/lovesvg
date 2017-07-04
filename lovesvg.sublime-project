@@ -4,5 +4,14 @@
 		{
 			"path": "."
 		}
-	]
+	],
+	
+    "build_systems": [
+        {
+            "working_dir": "${project_path}",
+            "name": "build and run project with love",
+            "cmd": ["love", "."],
+            "shell": "true"
+        }
+    ]
 }

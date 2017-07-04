@@ -95,7 +95,7 @@ end
 
 --- Parses element style CSS
 -- TODO: make a proper CSS parses
-local _parseCSS
+local _parseCSSValue, _parseCSS
 do
 	local pattern = "%s*([^:%s]+)%s*:%s*([^;]+)%s*;"
 	local end_pattern = pattern:sub(1, pattern:len() - 1) .. "$"
@@ -114,7 +114,7 @@ do
 		["none"] = function (v) return nil end,
 	}
 
-	local function _parseValue(v)
+	_parseCSSValue = function (v)
 		for pattern, f in pairs(parsers) do
 			local c = v:match(pattern)
 			if c then return f(c) end
@@ -150,18 +150,25 @@ do
 	end
 end
 
+--- Transformations and stuff?
 local function _popStyle()
-	local s = {}
-
-	s.fill = { love.graphics.getColor() }
-
-	return s
 end
 
 local function _pushStyle(s)
-	if (not s) or (s == {}) then return end
+end
 
-	if s.fill then love.graphics.setColor(s.fill) end
+local function _setColor(s, colorKey)
+	if not s then return end
+
+	if s[colorKey] then
+		love.graphics.setColor(s[colorKey])
+	else
+	    love.graphics.setColor(0, 0, 0, 255)
+	end
+	if s["opacity"] then
+		local r, g, b, a = love.graphics.getColor()
+		love.graphics.setColor(r, g, b, s["opacity"] * 255)
+	end
 end
 
 -- Base for Object
@@ -231,18 +238,48 @@ end
 -- @param obj Object the attributes should be assigned to
 -- @param stack current element of the stack, as returned by _parseXML
 -- @see _newObject _parseXML
-local function _setAttributes(obj, stack)
-	for k, v in pairs(stack.xarg) do
-		obj.attributes[k] = v
+local _setAttributes
+do
+	local _count = 0
+	local function _idCounter()
+		_count = _count + 1
+		return _count
 	end
 
-	if obj.attributes.style then
-		obj.attributes.style = _parseCSS(obj.attributes.style)
-	else
-		obj.attributes.style = {}
-	end
+	local override_style_args = {
+		"fill",
+		"opacity",
+		"stroke",
+		"stroke-width",
+		"width",
+		"height",
+	}
 
-	return obj
+	_setAttributes = function (obj, stack)
+		for k, v in pairs(stack.xarg) do
+			obj.attributes[k] = v
+		end
+
+		if not obj.attributes.id then
+			-- make up a ID
+			obj.attributes.id = string.format("%s%d", obj.label, _idCounter())
+		end
+
+		if obj.attributes.style then
+			obj.attributes.style = _parseCSS(obj.attributes.style)
+		else
+			obj.attributes.style = {}
+		end
+
+		for _, k in ipairs(override_style_args) do
+			if obj.attributes[k] then
+				print("overrode " .. k .. " on " .. obj.attributes.id)
+				obj.attributes.style[k] = _parseCSSValue(obj.attributes[k])
+			end
+		end
+
+		return obj
+	end
 end
 
 -- base for Renderer
@@ -360,12 +397,12 @@ local _PathRenderer = {
 
 	draw = function (self, style)
 		local old_color = { love.graphics.getColor() }
-		if style.fill and self.mesh then
-			love.graphics.setColor(style.fill)
+		if self.mesh then
+			_setColor(style, "fill")
 			love.graphics.draw(self.mesh, 0,0)
 		end
 		if style.stroke and self.polygon then
-			love.graphics.setColor(style.stroke)
+			_setColor(style, "stroke")
 
 			local old_width = love.graphics.getLineWidth()
 			love.graphics.setLineWidth(style['stroke-width'] or old_width)
@@ -741,13 +778,12 @@ local _RectRenderer = {
 
 	draw = function (self, style)
 		local old_color = { love.graphics.getColor() }
-		if style.fill then
-			love.graphics.setColor(style.fill)
-			love.graphics.rectangle('fill', self.x, self.y, self.width, self.height)
-		end
+		_setColor(style, "fill")
+		love.graphics.rectangle('fill', self.x, self.y, self.width, self.height)
+
 
 		if style.stroke then
-			love.graphics.setColor(style.stroke)
+			_setColor(style, "stroke")
 			love.graphics.rectangle('line', self.x, self.y, self.width, self.height)
 		end
 
@@ -765,6 +801,61 @@ local function _rectRenderer(obj)
 		height = tonumber(obj.attributes.height)
 	}
 	setmetatable(r, { __index = _RectRenderer, __call = r.render })
+	return r
+end
+
+
+--- Metatable for ImageRenderer
+local _ImageRenderer = {
+	prepareImage = function (self)
+		local scheme, rest = self.href:match("^([^:]+)%:(.+)$")
+
+		local img = self.schemeHandlers[scheme](rest)
+		self.image = img
+	end,
+
+	schemeHandlers = {
+		data = function (rest)
+			local mime, encoding, data = rest:match("^([^;]+);([^,]+),(.+)$")
+
+			if encoding == "base64" then
+				local filedata = love.filesystem.newFileData(data, "name", encoding)
+				local imagedata = love.image.newImageData(filedata)
+				local image = love.graphics.newImage(imagedata)
+
+				return image
+			else
+				error(string.format("%s is not supported encoding, make a Issue"))
+			end
+		end
+	},
+
+	render = function (self, options)
+		local width = self.obj.attributes.style.width or self.image:getWidth()
+		local height = self.obj.attributes.style.height or self.image:getHeight()
+		self.AABB = { 0,0, width,height }
+	end,
+
+	draw = function (self, style)
+		local old_color = { love.graphics.getColor() }
+		_setColor(style, "fill")
+		love.graphics.draw(self.image, 0, 0)
+
+		love.graphics.setColor(old_color)
+	end,
+}
+
+--- Constructs a new ImageRenderer
+-- @param obj a SVG[image] obj
+local function _imageRenderer(obj)
+	local href = obj.attributes.href or obj.attributes["xlink:href"]
+	local r = {
+		href = href,
+		obj = obj
+	}
+
+	setmetatable(r, { __index = _ImageRenderer })
+	r:prepareImage()
 	return r
 end
 
@@ -786,6 +877,8 @@ local function _walkStack(root, stack)
 		end
 	elseif root.label == "rect" then
 		root.renderer = _rectRenderer(root)
+	elseif root.label == "image" then
+		root.renderer = _imageRenderer(root)
 	end
 
 	if #stack and (#stack > 0) then
