@@ -3,29 +3,25 @@ local lovesvg = require "lovesvg"
 local img
 local x,y, xx, yy = math.huge,math.huge, -math.huge,-math.huge
 
+local file_pattern = "^.*%.svg$"
+local files = {}
+
+local function findFiles(folder)
+	local items = love.filesystem.getDirectoryItems(folder)
+	local out = {}
+
+	for _, item in ipairs(items) do
+		if item:match(file_pattern) then
+			table.insert(out, item)
+		end
+	end
+
+	return item
+end
+
 function love.load(arg)
 	local filename = arg[1] and (arg[1] ~= ".") or arg[2] or "love.svg"
 	img = lovesvg.loadSVG(filename, { depth = 4, discard_distance = 0.00001 })
-
-	-- this is just so we can center the image to the screen
-	-- this will probably be moved to lovesvg
-	local min, max = math.min, math.max
-	local function findAABB(obj)
-		if obj.renderer then
-			if not obj.renderer.AABB then
-				print('No AABB (triangulation failed):' .. obj.label .. '#' .. obj.attributes.id)
-			else
-				x = min(obj.renderer.AABB[1], x)
-				y = min(obj.renderer.AABB[2], y)
-				xx = max(obj.renderer.AABB[3], xx)
-				yy = max(obj.renderer.AABB[4], yy)
-			end
-		end
-		for _, child in obj:ichildren() do
-			findAABB(child)
-		end
-	end
-	findAABB(img)
 
 	love.graphics.setBackgroundColor(64, 64, 64, 255)
 end
@@ -46,6 +42,7 @@ function love.draw()
 	love.graphics.setColor(255, 255, 255, 255)
 
 	-- center the image to the screen, zoom to fit
+	local x,y, xx,yy = unpack(img.attributes.viewBox)
 	local iw, ih = xx - x, yy - y
 
 	local s = math.min(cw / iw, ch / ih)

@@ -111,6 +111,16 @@ do
 		["%-?%d+%.?%d*"] = function (v)
 			return tonumber(v)
 		end,
+		["%w+%b()"] = function (v)
+			local func, args_s = v:match("^(%w+)%((.-)%)$")
+
+			local args = {}
+			for arg in args:gmatch("[^%s,]+") do
+				table.insert(args, arg)
+			end
+
+			return { func, args }
+		end,
 		["none"] = function (v) return nil end,
 	}
 
@@ -263,6 +273,10 @@ do
 		if not obj.attributes.id then
 			-- make up a ID
 			obj.attributes.id = string.format("%s%d", obj.label, _idCounter())
+		end
+
+		if obj.attributes.viewBox then
+			obj.attributes.viewBox = { obj.attributes.viewBox:match("(%-?%d+%.?%d*)%s+(%-?%d+%.?%d*)%s+(%-?%d+%.?%d*)%s+(%-?%d+%.?%d*)") }
 		end
 
 		if obj.attributes.style then
@@ -906,6 +920,15 @@ function lovesvg.parseSVG(contents)
 	local root = _newObject()
 
 	_walkStack(root, stack)
+
+	if root.label ~= "svg" then
+		for _, obj in root:ichildren() do
+			if obj.label == "svg" then
+				root = obj
+				break
+			end
+		end
+	end
 
 	return root
 end
